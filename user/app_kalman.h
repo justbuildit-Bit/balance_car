@@ -73,6 +73,11 @@ float App_Kalman_GetPitch(void);
 float App_Kalman_GetRoll(void);
 float App_Kalman_GetYaw(void);
 
+/* 加速度计直接解算的角度（未滤波）。噪声大，用于和滤波结果对照观察，
+ * 也可以用 VOFA+ 画在同一个波形图里看滤波器的抑制效果。 */
+float App_Kalman_GetAccelPitch(void);
+float App_Kalman_GetAccelRoll(void);
+
 float App_Kalman_GetPitchBias(void);
 float App_Kalman_GetRollBias(void);
 

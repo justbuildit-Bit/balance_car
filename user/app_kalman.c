@@ -30,6 +30,11 @@ static Kalman_t kf_roll;
 static float pitch, roll, yaw;
 static float yaw_rate = 0.0f;//去零偏后的 z 轴角速度，单位°/s
 
+//#2.1 加速度计直接解算的角度（未经任何滤波）
+//     只在 Proc 里更新，供 VOFA+ 画"原始 vs 滤波后"的对照曲线
+static float pitch_acc, roll_acc;
+
+
 //#3. 首次进入时用加速度计角度做初值，避免从 0° 慢慢往上爬
 static uint8_t kf_ready = 0;
 
@@ -168,6 +173,11 @@ void App_Kalman_Proc(void)
 	pitch_a = qatan2(ay, az) / 3.1415927 * 180.0f;
 	roll_a  = qatan2(ax, az) / 3.1415927 * 180.0f;
 
+	//存一份原始解算结果，供 VOFA+ 观察滤波器对噪声的抑制效果
+	pitch_acc = pitch_a;
+	roll_acc  = roll_a;
+
+
 	//#3. 首次进入用加速度计角度做初值
 	if (kf_ready == 0)
 	{
@@ -241,6 +251,24 @@ void App_Kalman_GyroCalibrate(uint16_t samples)
 float App_Kalman_GetPitch(void)
 {
 	return pitch;
+}
+
+//
+//@简介：获取"加速度计直接解算"的俯仰角，单位°
+//@说明：完全没经过滤波，噪声大但能反映真实输入。
+//       和 App_Kalman_GetPitch() 画在一起，就能看出滤波器压掉了多少噪声。
+//
+float App_Kalman_GetAccelPitch(void)
+{
+	return pitch_acc;
+}
+
+//
+//@简介：获取"加速度计直接解算"的翻滚角，单位°
+//
+float App_Kalman_GetAccelRoll(void)
+{
+	return roll_acc;
 }
 
 //
