@@ -11,6 +11,7 @@
 #include "app_motor.h"
 #include "delay.h"
 #include "app_usart2.h"
+#include "app_vofa.h"
 #include "task.h"
 #include "app_MPU6050.h"
 #include "app_kalman.h"
@@ -29,7 +30,9 @@ int main(void)
 //	Encoder_Test();
 //	Bat_Test();
 //	PWM_Test();
-	App_USART2_Init();
+	//串口波形输出（VOFA+），占用 USART2：PA2=TX、PA3=RX，波特率见 app_vofa.h
+	//它会重新配置 USART2，所以不再单独调用 App_USART2_Init()
+	App_Vofa_Init();
 	App_Button_Init();
 	App_Encoder_Init();
 	App_PWM_Init();
@@ -51,6 +54,7 @@ int main(void)
 		App_Motor_Proc();
 		App_MPU6050_Proc();//互补滤波（保留，用于对照）
 		App_Kalman_Proc();//卡尔曼滤波：必须在 MPU6050_Proc 之后，读的才是本周期的数据
+		App_Vofa_Proc();//串口发波形：放在两个滤波之后，发出去的才是本周期结果
 		App_Control_Proc();
 		App_RC_Proc();
 	}

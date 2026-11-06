@@ -18,7 +18,7 @@
 |---|---|
 | 整车照片 | ✅ [docs/images/car.jpg](docs/images/car.jpg) |
 | 实车演示视频 | ✅ [docs/images/demo.mp4](docs/images/demo.mp4) |
-| 姿态曲线 | 待补充（MPU6050 原始数据 vs 卡尔曼滤波后角度） |
+| 姿态曲线 | 待补充（VOFA+ 截图：原始 / 互补 / 卡尔曼 三路叠加，见下节） |
 | 参数整定 | 待补充（各 PID 环的最终参数与整定记录） |
 
 补充素材放到 `docs/images/` 下，然后在 README 里引用：
@@ -45,6 +45,7 @@ user/                应用层，每个模块遵循 Xxx_Init / Xxx_Proc 的写�
   main.c             外设初始化 + 主循环调度
   app_control.c      直立与运动控制，对外提供速度 / 转向设定接口
   app_kalman.c       卡尔曼滤波姿态解算
+  app_vofa.c         串口波形输出（VOFA+ FireWater 协议），发原始/互补/卡尔曼三路角度
   app_MPU6050.c      IMU 数据读取 + 互补滤波（保留用于对照）
   app_motor.c        电机输出
   app_encoder.c      编码器测速
@@ -88,6 +89,47 @@ make clean  # 清理
 - `ci/RTE_Components.h` — Keil 自动生成的 RTE 组件宏的静态替身
 
 Keil 编译完全不受影响，这三处对 ARMCC 都是空操作。
+
+## 调试与可视化（VOFA+）
+
+固件把姿态解算的中间量按固定周期从串口发出去，用 [VOFA+](https://www.vofa.plus/) 就能把「加速度计原始角度」和「滤波后角度」画在同一张波形图里，滤波效果一眼可见。
+
+**接线**（默认走 USART2，PA2/PA3 空闲可用）：
+
+```
+STM32 PA2 (USART2_TX) → USB-TTL 的 RX
+STM32 GND             → USB-TTL 的 GND
+```
+
+**VOFA+ 设置**：数据引擎选 **FireWater**，波特率 **115200**，8 数据位 / 无校验 / 1 停止位。然后从左侧拖一个「波形图」控件，通道按顺序对应：
+
+| 通道 | 含义 | 曲线特征 |
+|---|---|---|
+| `ch0` | 加速度计直接解算的角度（`App_Kalman_GetAccelPitch`） | 噪声大，上下抖动明显 |
+| `ch1` | 互补滤波角度（`App_MPU6050_GetPitch`，原有算法） | 平滑，但快速转动时相位滞后 |
+| `ch2` | 卡尔曼滤波角度（`App_Kalman_GetPitch`） | 平滑且滞后更小，还能估出陀螺零偏 |
+
+实际发出的数据帧长这样（50Hz）：
+
+```
+angle:-1.24,-1.31,-1.28
+```
+
+**相关配置**都在 `user/app_vofa.h`：
+
+```c
+#define APP_VOFA_ENABLE      1       // 发布固件时改成 0，编译后完全不占用 CPU 和串口
+#define APP_VOFA_PORT        2       // 2 = USART2(PA2/PA3)，1 = USART1(PA9/PA10)
+#define APP_VOFA_BAUD        115200  // 必须和 VOFA+ 一致
+#define APP_VOFA_PERIOD_MS   20      // 20ms = 50Hz
+```
+
+两个实现细节值得说明：
+
+- **不用 `printf("%f")`**：Keil MicroLIB 与 newlib-nano 对浮点格式化的支持不一致，直接用 `%f` 容易一端编过、另一端输出乱码。模块内部把角度乘 100 转成整数，手工拼小数点，两种工具链行为完全一致。
+- **发送放在两个滤波之后**：`App_Vofa_Proc()` 必须排在 `App_MPU6050_Proc()` 和 `App_Kalman_Proc()` 之后，否则发出去的是上一周期的数据。
+
+
 
 ## 关于字库
 

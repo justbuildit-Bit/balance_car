@@ -514,6 +514,16 @@
               <FileType>5</FileType>
               <FilePath>.\user\app_kalman.h</FilePath>
             </File>
+            <File>
+              <FileName>app_vofa.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\user\app_vofa.c</FilePath>
+            </File>
+            <File>
+              <FileName>app_vofa.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\user\app_vofa.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
