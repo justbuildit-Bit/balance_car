@@ -1,0 +1,34 @@
+# ---- Keil MDK 构建产物 ----
+Objects/
+Listings/
+DebugConfig/
+*.o
+*.d
+*.crf
+*.axf
+*.hex
+*.bin
+*.elf
+*.lnp
+*.dep
+*.map
+*.lst
+*.sct
+*.iex
+*.build_log.htm
+
+# ---- Keil 个人/调试配置（每人不同，不入库）----
+*.uvguix
+*.uvguix.*
+*.uvoptx
+*.bak
+*.tmp
+
+# ---- 字库字体与转换工具（体积大且有版权，本地自备）----
+my_lib/font/ttfttc/
+my_lib/font/*.exe
+
+# ---- 系统文件 ----
+Thumbs.db
+desktop.ini
+.DS_Store

@@ -1,0 +1,9 @@
+* text=auto
+
+# Keil 工程文件与脚本保持 CRLF，避免 Windows 上打开报错
+*.uvprojx text eol=crlf
+*.uvoptx text eol=crlf
+*.scvd text eol=crlf
+*.cmd text eol=crlf
+*.s text eol=crlf
+*.bat text eol=crlf
