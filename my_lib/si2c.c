@@ -8,6 +8,7 @@
   ******************************************************************************
   */
 #include "si2c.h"
+#include "compiler_compat.h"
 
 #define scl_w(v) GPIO_WriteBit(SI2C->SCL_GPIOx, SI2C->SCL_GPIO_Pin, ((v)?Bit_SET:Bit_RESET))
 #define sda_w(v) GPIO_WriteBit(SI2C->SDA_GPIOx, SI2C->SDA_GPIO_Pin, ((v)?Bit_SET:Bit_RESET))

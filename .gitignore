@@ -2,6 +2,7 @@
 Objects/
 Listings/
 DebugConfig/
+build/
 *.o
 *.d
 *.crf

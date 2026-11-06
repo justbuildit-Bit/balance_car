@@ -4,7 +4,7 @@
 #include "app_button.h"
 #include "app_pwm.h"
 #include "pwm_test.h"
-#include "Encoder_test.h"
+#include "encoder_test.h"
 #include "MPU6050_test.h"
 #include "qmath_test.h"
 #include "app_encoder.h"
