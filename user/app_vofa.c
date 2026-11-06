@@ -3,6 +3,7 @@
 #include "task.h"
 #include "app_kalman.h"
 #include "app_MPU6050.h"
+#include "app_control.h"
 
 #if APP_VOFA_ENABLE
 
@@ -146,7 +147,7 @@ void App_Vofa_Init(void)
 void App_Vofa_Proc(void)
 {
 #if APP_VOFA_ENABLE
-	char  buf[80];
+	char  buf[112];
 	char *p = buf;
 
 	PERIODIC(APP_VOFA_PERIOD_MS)
@@ -161,6 +162,14 @@ void App_Vofa_Proc(void)
 	p = Vofa_PutFixed(p, App_Kalman_GetGyroOffset());   // ch3 零偏标定值  [°/s]
 	*p++ = ',';
 	p = Vofa_PutFixed(p, App_Kalman_GetPitchBias());    // ch4 卡尔曼残余零偏  [°/s]
+#if APP_VOFA_PROBE
+	*p++ = ',';
+	p = Vofa_PutFixed(p, App_Control_GetThetaRef());    // ch5 速度环输出 = 外环设定值  [°]
+	*p++ = ',';
+	p = Vofa_PutFixed(p, App_Control_GetXdot());        // ch6 速度环反馈  [cm/s]
+	*p++ = ',';
+	p = Vofa_PutFixed(p, App_Control_GetThetaDot());    // ch7 角速度环反馈  [°/s]
+#endif
 	*p++ = '\r';
 	*p++ = '\n';
 

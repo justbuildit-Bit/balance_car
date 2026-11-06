@@ -19,7 +19,19 @@
 //
 //注意：Kp 和 Ki 必须按同一比例缩。只降 Kp 会把零点从 1 rad/s 推到 1.67 rad/s，
 //      损失相位超前，相位裕度反而从 70.4° 降到 66.1°，实验会得出错误结论。
-#define EXP_OMEGA_GAIN_LOW   1
+//
+//【实验结论 2026-11-06，桌面 A/B】档位 1 已实测，结论为「否」：
+//   穿越频率降了 38%（1.55 → 0.96 Hz），摆动周期却在 29.6 采样点(1.69 Hz)原地不动，
+//   与基线 27.6~29.3 采样点完全重叠；而稳态峰峰从 7° 涨到 13°、推力峰峰从 25° 涨到 58°。
+//   → 极限环的频率不由角速度环增益决定，降增益只是把系统变软。
+//   故默认值回到 0。下一轮用 VOFA 探针通道(ch5 θ_ref / ch6 ẋ)定位真正的激励源。
+#define EXP_OMEGA_GAIN_LOW   0
+
+//速度环开环实验开关：θ_ref 强制为 0，把外环摘掉，只留角度环 + 角速度环闭环
+//  0 = 正常（速度环工作）
+//  1 = 速度环开环 —— 用来判断 1.7Hz 摆动是不是速度环引起的
+//      ⚠ 开环后车不再维持位置，会持续朝一个方向漂走，测几秒就扶住
+#define EXP_SPEED_LOOP_OPEN  0
 
 static PID_TypeDef pid_velocity;//速度环的PID控制器
 static PID_TypeDef pid_theta;//θ环的PID控制器
@@ -31,6 +43,11 @@ static const float lp = 0.062;//平衡车中心到电池中心的距离， 单�
 static const float rw = 0.032;//轮胎的半径，单位m
 static float omega_ref = 0.0f;
 static uint64_t lastTime = 0;
+
+//调试探针：只给 VOFA+ 读，不参与控制运算（写在 Proc 里、读在同一个 while 循环里，无需加锁）
+static float probe_theta_ref = 0.0f;//[rad]  速度环输出 = 倒立摆外环的设定值
+static float probe_x_dot     = 0.0f;//[m/s]  速度环反馈值
+static float probe_theta_dot = 0.0f;//[rad/s]角速度环反馈值
 //
 //@简介：负责初始化平衡车控制系统
 //
@@ -86,7 +103,16 @@ void App_Control_Proc(void)
 	float x_dot = omega1 * rw;
 	
 	//#4. 计算速度环PID的输出
+#if EXP_SPEED_LOOP_OPEN
+	float theta_ref = 0.0f;//实验：速度环开环，外环设定值恒为 0（车会缓慢漂走，属正常）
+#else
 	float theta_ref = qatan(PID_Compute(&pid_velocity, x_dot) / g);
+#endif
+
+	//探针：把两个环路之间的中间量存下来给波形用
+	probe_x_dot     = x_dot;
+	probe_theta_ref = theta_ref;
+	probe_theta_dot = theta_dot;
 	
 	//#5. 设定倒立摆外环的设定值SP
 	PID_ChangeSP(&pid_theta, theta_ref);
@@ -156,4 +182,28 @@ void App_Control_SetMoveSpeed(float MoveSpeed)
 void App_Control_SetTurnSpeed(float TurnSpeed)
 {
 	PID_ChangeSP(&pid_turn, TurnSpeed);
+}
+
+//
+// @简介：读取速度环输出（倒立摆外环设定值），单位 度
+//
+float App_Control_GetThetaRef(void)
+{
+	return probe_theta_ref * 57.29578f;
+}
+
+//
+// @简介：读取速度环反馈值，单位 cm/s（乘 100 是为了和角度量级接近，方便同图显示）
+//
+float App_Control_GetXdot(void)
+{
+	return probe_x_dot * 100.0f;
+}
+
+//
+// @简介：读取角速度环反馈值，单位 度每秒
+//
+float App_Control_GetThetaDot(void)
+{
+	return probe_theta_dot * 57.29578f;
 }
