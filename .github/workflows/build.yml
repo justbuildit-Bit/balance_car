@@ -18,7 +18,8 @@ jobs:
       - name: 安装 ARM 交叉编译工具链
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi
+          # 必须带上 newlib，否则缺 math.h 等标准库头文件
+          sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi
           arm-none-eabi-gcc --version | head -1
 
       - name: 编译全部源文件
