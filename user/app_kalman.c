@@ -304,6 +304,17 @@ float App_Kalman_GetRollBias(void)
 }
 
 //
+//@简介：获取上电标定得到的 x 轴陀螺零偏，单位°/s（调试用）
+//@说明：这个值只被卡尔曼通道扣掉了，app_MPU6050 里的互补滤波用的是原始 gx，
+//       所以互补滤波的稳态偏差就等于 该值 × 互补滤波时间常数(0.1s)，
+//       把它发到 VOFA+ 上就能把这笔账对上。
+//
+float App_Kalman_GetGyroOffset(void)
+{
+	return gx_offset;
+}
+
+//
 //@简介：获取去零偏后的俯仰角速度，单位°/s（控制环 D 项直接可用）
 //
 float App_Kalman_GetPitchRate(void)

@@ -146,7 +146,7 @@ void App_Vofa_Init(void)
 void App_Vofa_Proc(void)
 {
 #if APP_VOFA_ENABLE
-	char  buf[64];
+	char  buf[80];
 	char *p = buf;
 
 	PERIODIC(APP_VOFA_PERIOD_MS)
@@ -157,6 +157,10 @@ void App_Vofa_Proc(void)
 	p = Vofa_PutFixed(p, App_MPU6050_GetPitch());       // ch1 互补滤波
 	*p++ = ',';
 	p = Vofa_PutFixed(p, App_Kalman_GetPitch());        // ch2 卡尔曼
+	*p++ = ',';
+	p = Vofa_PutFixed(p, App_Kalman_GetGyroOffset());   // ch3 零偏标定值  [°/s]
+	*p++ = ',';
+	p = Vofa_PutFixed(p, App_Kalman_GetPitchBias());    // ch4 卡尔曼残余零偏  [°/s]
 	*p++ = '\r';
 	*p++ = '\n';
 
