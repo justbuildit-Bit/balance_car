@@ -81,6 +81,10 @@ float App_Kalman_GetAccelRoll(void);
 float App_Kalman_GetPitchBias(void);
 float App_Kalman_GetRollBias(void);
 
+/* 上电标定得到的 x 轴陀螺零偏，单位°/s。
+ * 只被卡尔曼通道扣掉；互补滤波用原始 gx，所以它的稳态偏差 ≈ 该值 × 0.1s。 */
+float App_Kalman_GetGyroOffset(void);
+
 /* 已去掉零偏的角速度，可直接给控制环做 D 项和转向反馈。
  * GetPitchRate 减的是"标定零偏 + 滤波器估计的 bias"，比原始 gx 干净；
  * GetYawRate 减的是标定时测到的 gz 零偏（未标定时等于原始 gz）。 */
