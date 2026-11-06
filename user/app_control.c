@@ -12,6 +12,15 @@
 //（main 里两种滤波是并行跑的，改这一个宏就能做 A/B 对比）
 #define CONTROL_USE_KALMAN   1
 
+//角速度环增益实验开关：验证 1.8Hz 极限环是否由内环增益过高引起
+//  0 = 原参数 Kp=10, Ki=10 —— 开环穿越 9.77 rad/s (1.55 Hz)，相位裕度 70.4°
+//  1 = 实验参数 Kp=6, Ki=6 —— 开环穿越 6.01 rad/s (0.96 Hz)，相位裕度 72.0°
+//  2 = 更低一档 Kp=4, Ki=4 —— 开环穿越 4.10 rad/s (0.65 Hz)，相位裕度 70.4°
+//
+//注意：Kp 和 Ki 必须按同一比例缩。只降 Kp 会把零点从 1 rad/s 推到 1.67 rad/s，
+//      损失相位超前，相位裕度反而从 70.4° 降到 66.1°，实验会得出错误结论。
+#define EXP_OMEGA_GAIN_LOW   1
+
 static PID_TypeDef pid_velocity;//速度环的PID控制器
 static PID_TypeDef pid_theta;//θ环的PID控制器
 static PID_TypeDef pid_theta_dot;//θ点环的PID控制器
@@ -33,7 +42,13 @@ void App_Control_Init(void)
 	PID_Init(&pid_theta, 4.0f,0.0f,0.0f);//初始化θ环的PID
 	PID_LimitConfig(&pid_theta, +12.57f, -12.57);//将θ环的PID控制器输出限制在+-4Π rad/s之间
 	
+#if   EXP_OMEGA_GAIN_LOW == 1
+	PID_Init(&pid_theta_dot, 6.0f,6.0f,0.0f);//实验：内环整体降 6dB，零点仍在 1 rad/s
+#elif EXP_OMEGA_GAIN_LOW == 2
+	PID_Init(&pid_theta_dot, 4.0f,4.0f,0.0f);//实验：内环整体降 8dB，零点仍在 1 rad/s
+#else
 	PID_Init(&pid_theta_dot, 10.0f,10.0f,0.0f);//初始化θ点环的PID
+#endif
 	PID_LimitConfig(&pid_theta_dot, +125.7f, -125.7f);//将θ点环的PID控制器输出限制在+-40Π rad/s^2之间
 	
 	PID_Init(&pid_turn, 1.0f,0.0f,0.0f);//初始化转向环的PID
