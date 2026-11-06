@@ -6,14 +6,18 @@
 
 ## 效果展示
 
+![整车](docs/images/car.jpg)
+
+双轮差速结构，车体上方为两节锂电池供电，前部是主控板。
+
 ![实车直立演示](docs/images/demo.gif)
 
 实车直立行走，通过手机 App 遥控运行。上面是压缩后的预览（260px / 6fps / 6s），[**完整视频**](docs/images/demo.mp4) 为 720×1280、23 秒。
 
 | 内容 | 状态 |
 |---|---|
+| 整车照片 | ✅ [docs/images/car.jpg](docs/images/car.jpg) |
 | 实车演示视频 | ✅ [docs/images/demo.mp4](docs/images/demo.mp4) |
-| 整车照片 | 待补充 |
 | 姿态曲线 | 待补充（MPU6050 原始数据 vs 卡尔曼滤波后角度） |
 | 参数整定 | 待补充（各 PID 环的最终参数与整定记录） |
 
