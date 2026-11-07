@@ -1,11 +1,34 @@
-#include "app_kalman.h"
-#include "app_MPU6050.h"
-#include "task.h"
-#include "qmath.h"
+#include "app_kalman.h"                    //本模块的类型定义（Kalman_t）与对外接口
+#include "app_MPU6050.h"                   //只用来调 GetAx/GetGx 等取值接口，不改动互补滤波
+#include "task.h"                          //PERIODIC 宏 + GetTick()，提供 5ms 调度节拍
+#include "qmath.h"                         //qatan2：定点友好版 atan2，比 libm 的 atan2 快
 
 /*
- * 卡尔曼滤波实现
- * ------------------------------------------------------------
+ * 卡尔曼滤波实现（逐行注释版）
+ * ============================================================
+ * 【怎么读这个文件】
+ *   真正的卡尔曼算法只有 4 个函数、约 20 行有效代码：
+ *       App_Kalman_Init     → 初始化（只跑一次）
+ *       App_Kalman_Predict  → 五步里的 ①②（预测）
+ *       App_Kalman_Correct  → 五步里的 ③④⑤（校正）
+ *       App_Kalman_Update   → 把上面两个串起来
+ *   剩下 200 行全是工程包装：取值、单位换算、零偏标定、getter。
+ *   所以不要被行数吓到，盯着那 20 行就够。
+ *
+ * 【一句话原理】
+ *   角度有两个来源，都不准但错的方式不同：
+ *       陀螺仪积分 → 平滑，但零偏会一直累积（漂）
+ *       加速度计   → 不漂，但每帧都抖（吵）
+ *   融合就是加权平均：x = x_预测 + K * (测量 - x_预测)
+ *   权重 K 由"谁更确定"实时算出：K = P / (P + R)
+ *   P 是预测的不确定度，R 是测量的不确定度。
+ *
+ * 【状态是怎么选的】
+ *   状态向量 x = [角度, 陀螺零偏]^T，两个量。
+ *   为什么非要带上零偏？因为陀螺的错不是随机噪声，是系统性偏移，
+ *   噪声只能滤掉，偏移可以估出来再扣掉。多花一个状态，
+ *   就换来"角度不会随时间漂"这个性质。
+ * ============================================================
  * 状态空间（对应《自动控制原理》现代控制部分）：
  *
  *   x(k) = A * x(k-1) + B * u(k)
@@ -18,32 +41,56 @@
  * 校正：K = P*H'/(H*P*H'+R)  x = x + K*(z - H*x)   P = (I-K*H)*P
  *
  * A、H 结构固定，下面把矩阵乘法全部展开成标量运算，
- * 避免通用矩阵库的循环开销（STM32F103 没有硬件浮点）。
- * ------------------------------------------------------------
+ * 避免通用矩阵库的循环开销（STM32F103 没有硬件浮点，
+ * 一次 float 乘法约几十个周期，2x2 矩阵乘法展开能省掉循环判读和寻址）。
+ * 展开的代价是可读性变差 —— 所以每一行下面都写了它对应矩阵的哪一项。
+ * ============================================================
  */
 
 //#1. 两个滤波器实例：俯仰角一个、翻滚角一个
+//    为什么不写成一个"处理三维姿态"的滤波器？
+//    因为偏航角没有绝对参考（没有磁力计），把三轴塞进一个状态向量
+//    只会让互不相关的通道通过协方差交叉污染。拆成两个独立实例，
+//    每个实例的 P 是 2x2 而不是 6x6，运算量和调参难度都低一个量级。
 static Kalman_t kf_pitch;
 static Kalman_t kf_roll;
 
 //#2. 融合输出
+//    为什么用文件级 static 而不是把结果塞回 Kalman_t？
+//    因为上层（控制环、VOFA+）只想要一个 float，不该关心滤波器内部结构。
+//    static 让它只在本文件可见，外部只能通过 Get 接口读，避免被误写。
 static float pitch, roll, yaw;
-static float yaw_rate = 0.0f;//去零偏后的 z 轴角速度，单位°/s
+static float yaw_rate = 0.0f;              //去零偏后的 z 轴角速度，单位°/s
 
 //#2.1 加速度计直接解算的角度（未经任何滤波）
 //     只在 Proc 里更新，供 VOFA+ 画"原始 vs 滤波后"的对照曲线
+//     为什么要单独存一份？调滤波器时最需要看的就是"输入长什么样"，
+//     如果只发滤波结果，摆动到底是传感器噪声还是滤波器自己振的，根本分不清。
 static float pitch_acc, roll_acc;
 
 
 //#3. 首次进入时用加速度计角度做初值，避免从 0° 慢慢往上爬
+//    如果初值给 0，而车实际歪着 15° 放着，滤波器要花好几个时间常数
+//    才能爬过去，这段时间里车已经被控制环推翻了。
 static uint8_t kf_ready = 0;
 
 //#4. 陀螺仪静态零偏（App_Kalman_GyroCalibrate 标定后才有值）
+//    注意这套 offset 和滤波器内部的 bias 是两回事：
+//      offset：上电静止 0.3s 取平均，一次性写死，之后不再变；
+//      bias  ：滤波器在线估计，每 5ms 更新一次。
+//    两层都留是因为 offset 能把偏航角（没有卡尔曼通道）也一起修掉，
+//    而 bias 能跟踪温漂——上电标定值会随温度慢慢失效，实测能差到 5°/s。
 static float gx_offset = 0.0f;
 static float gy_offset = 0.0f;
 static float gz_offset = 0.0f;
 
 //#5. 采样周期 5ms
+//    写成宏而不是函数传参，是因为 Proc 里 PERIODIC(5) 的节拍就是 5ms，
+//    两处必须一致。如果哪天把 PERIODIC(5) 改成 PERIODIC(2)，
+//    这个宏不改，滤波器就会以为每一步只过了 5ms 而实际过了 2ms，
+//    积分出来的角度会系统性偏大 2.5 倍 —— 这是最容易埋的坑。
+//    写成 0.005f 带 f 后缀：不加 f 编译器会按 double 处理，
+//    F103 没有 FPU，double 全靠软件模拟，慢一个数量级。
 #define KALMAN_DT    0.005f
 
 
@@ -51,22 +98,28 @@ static float gz_offset = 0.0f;
 //@简介：初始化卡尔曼滤波器
 //@参数：kf - 滤波器对象
 //@参数：initAngle - 初始角度，单位°
+//@说明：只在上电第一次进 Proc 时调用一次，用加速度计角度做初值。
 //
 void App_Kalman_Init(Kalman_t *kf, float initAngle)
 {
-	kf->angle = initAngle;
-	kf->bias  = 0.0f;
-	kf->rate  = 0.0f;
+	kf->angle = initAngle;                  //角度直接用测量值起步：此刻加速度计最可信
+	kf->bias  = 0.0f;                       //零偏从 0 开始猜，让滤波器自己收敛（不知道就先假设没有）
+	kf->rate  = 0.0f;                       //还没积分过，角速度输出先置 0，避免第一帧读到野值
 
 	//初始协方差：一开始并不完全相信陀螺积分，所以给 1
-	kf->P[0][0] = 1.0f;
-	kf->P[0][1] = 0.0f;
-	kf->P[1][0] = 0.0f;
-	kf->P[1][1] = 1.0f;
+	//P 的对角线是"各状态的不确定度（方差）"，单位分别是 (°)² 和 (°/s)²。
+	//为什么给 1 而不是 0？给 0 意味着"我完全确定自己的初值"，
+	//那样 K 会一直是 0，滤波器永远不听加速度计，自己飘走。
+	//给 1 的含义是"我大概知道自己歪多少，但不确定"，第一帧 K0 就会算成 0.5，
+	//立刻向测量值靠拢一半。
+	kf->P[0][0] = 1.0f;                     //角度方差
+	kf->P[0][1] = 0.0f;                     //角度与零偏的协方差：上电时认为两者无关
+	kf->P[1][0] = 0.0f;                     //协方差矩阵对称，P[1][0] 必须等于 P[0][1]
+	kf->P[1][1] = 1.0f;                     //零偏方差：单位 (°/s)²，暂定 ±1°/s 的不确定度
 
-	kf->Q_angle   = KALMAN_Q_ANGLE;
-	kf->Q_bias    = KALMAN_Q_BIAS;
-	kf->R_measure = KALMAN_R_MEASURE;
+	kf->Q_angle   = KALMAN_Q_ANGLE;         //三个噪声参数从宏搬进实例，
+	kf->Q_bias    = KALMAN_Q_BIAS;          //好处是可以给俯仰/翻滚设不同值，
+	kf->R_measure = KALMAN_R_MEASURE;       //也方便运行时在线改（做参数扫描实验时很有用）
 }
 
 //
@@ -74,18 +127,44 @@ void App_Kalman_Init(Kalman_t *kf, float initAngle)
 //@参数：kf - 滤波器对象
 //@参数：rateMeasure - 陀螺仪角速度，单位°/s
 //@参数：dt - 采样周期，单位s
+//@说明：这一步只信陀螺，完全不看加速度计。物理意义就是"按角速度积分推进角度"。
 //
 void App_Kalman_Predict(Kalman_t *kf, float rateMeasure, float dt)
 {
-	//#1. 状态预测
-	kf->rate   = rateMeasure - kf->bias;
-	kf->angle += dt * kf->rate;
+	//#1. 状态预测：x = A*x + B*u 的标量展开
+	//    展开过程（A 是上三角，所以只有两项）：
+	//      angle = 1*angle + (-dt)*bias + dt*u
+	//            = angle + dt*(u - bias)
+	//    这一句就是整个"陀螺积分"的本质：把测到的角速度扣掉零偏，乘时间，累加。
+	kf->rate   = rateMeasure - kf->bias;    //先用"测量值 - 当前零偏估计"得到真实角速度
+	                                        //注意减的是 bias 不是 gx_offset：
+	                                        //gx_offset 在进函数前已经扣过了，bias 是在线补的残余量
+	kf->angle += dt * kf->rate;             //角速度 × 时间 = 角度增量，这也是漂移的来源：
+	                                        //只要 rate 有 0.01°/s 的残余误差，1 小时后就偏 36°
 
 	//#2. 协方差预测 P = A*P*A' + Q，按 A 的结构展开
+	//    为什么预测也要更新 P？因为每积分一步，不确定性都在长大：
+	//    陀螺的噪声、量化误差、模型误差都被积分累积进来了。
+	//    完整推导（可以照着验算，A = [1 -dt; 0 1]）：
+	//      A*P    = [p00-dt*p10, p01-dt*p11;  p10, p11]
+	//      A*P*A' = [p00-dt*p10-dt*p01+dt^2*p11,  p01-dt*p11;
+	//                p10-dt*p11,                  p11        ]
+	//    下面四行就是把这四项抄下来，再各自加上 Q。
+	//    Q 乘了 dt：因为 Q 的定义是"噪声密度（单位时间的方差增长率）"，
+	//    不是"每一步的方差增量"，离散化时要按时间长度缩放。
 	kf->P[0][0] += dt * (dt * kf->P[1][1] - kf->P[0][1] - kf->P[1][0] + kf->Q_angle);
-	kf->P[0][1] -= dt * kf->P[1][1];
-	kf->P[1][0] -= dt * kf->P[1][1];
-	kf->P[1][1] += kf->Q_bias * dt;
+	                                        //p00 += dt^2*p11 - dt*p01 - dt*p10 + dt*Q_angle
+	                                        //dt^2*p11 那一项是"零偏的不确定度会通过积分传进角度"，
+	                                        //这就是为什么角度方差不会无限长大，而是被零偏方差撑住
+	kf->P[0][1] -= dt * kf->P[1][1];        //p01 = p01 - dt*p11：角度和零偏变得负相关
+	                                        //直观理解：如果零偏被我估大了，我算出的角度就会偏小，
+	                                        //两者反向联动，所以相关系数为负
+	kf->P[1][0] -= dt * kf->P[1][1];        //p10 恒等于 p01，必须同步更新，否则矩阵失去对称性，
+	                                        //后面 K1 = P[1][0]/S 的符号就会错
+	kf->P[1][1] += kf->Q_bias * dt;         //p11 += Q_bias*dt：零偏自己会随机游走（主要是温漂），
+	                                        //所以它的不确定度也要随时间缓慢长大，
+	                                        //这样滤波器才不会"锁死"在开机时的零偏估计上
+	                                        //这一行必须放最后：上面两行用的是旧的 P[1][1]
 }
 
 //
@@ -93,36 +172,74 @@ void App_Kalman_Predict(Kalman_t *kf, float rateMeasure, float dt)
 //@参数：kf - 滤波器对象
 //@参数：angleMeasure - 加速度计解算出的角度，单位°
 //@返回值：融合后的角度，单位°
+//@说明：这一步才开始看加速度计，用"测量 - 预测"的差去修两个状态。
 //
 float App_Kalman_Correct(Kalman_t *kf, float angleMeasure)
 {
+	//都声明在函数开头（C89 风格）：Keil ARMCC 默认按 C89 编译，
+	//中途声明变量会报错；而且局部变量比反复访问结构体成员快，
+	//下面 P00/P01 会被读两次，先取出来能省重复的内存访问。
 	float y, S, K0, K1, P00, P01;
 
 	//#1. 新息，并把差值折算到 ±180° 内，
 	//防止角度在 ±180° 附近跳变时被当成突变 360° 而疯狂修正
-	y = angleMeasure - kf->angle;
-	while (y >  180.0f) y -= 360.0f;
-	while (y < -180.0f) y += 360.0f;
+	//"新息"（innovation）就是这次测量带来的、预测里没有的信息量。
+	y = angleMeasure - kf->angle;           //z - H*x，H=[1 0] 所以就是 z - angle
+	                                        //这个差值才是真正被利用的东西：
+	                                        //如果预测和测量一致，y=0，滤波器什么都不改
+	while (y >  180.0f) y -= 360.0f;        //角度是环形量，-179° 和 +181° 是同一个姿态。
+	while (y < -180.0f) y += 360.0f;        //不折回的话，跨零点瞬间 y 会蹦出 360°，
+	                                        //K0*y 一乘就把角度打飞，车直接倒。
+	                                        //用 while 而不是 if：理论上一次就够，
+	                                        //但如果测量值本身越界（异常数据），while 更稳。
 
 	//#2. 卡尔曼增益，H = [1 0]
-	S  = kf->P[0][0] + kf->R_measure;
-	K0 = kf->P[0][0] / S;
-	K1 = kf->P[1][0] / S;
+	//    K = P*H'/(H*P*H'+R)，H 只有一个 1，所以：
+	//      H*P*H' + R = P[0][0] + R   （一个标量，叫新息方差 S）
+	//      K = P*H'/S = [P[0][0]/S ; P[1][0]/S]
+	S  = kf->P[0][0] + kf->R_measure;       //分母 = 我的不确定度 + 测量的不确定度
+	                                        //这个 S 也有物理意义：它就是我"预期 y 有多大"的方差，
+	                                        //标准的卡尔曼还会用它算 likelihood 做异常值剔除
+	K0 = kf->P[0][0] / S;                   //角度增益。这个比值就是加权平均的权重：
+	                                        //R 越小（加计越准）→ K0 越接近 1 → 越听测量的
+	                                        //P 越小（越自信）  → K0 越接近 0 → 越听自己的
+	                                        //稳态时你的参数下 K0 = 0.0386，即每步只采信 3.86%
+	K1 = kf->P[1][0] / S;                   //零偏增益。注意分子是 P[1][0] 而不是 P[1][1]，
+	                                        //说明零偏不是直接由测量修正的，而是"通过角度误差间接"修正的：
+	                                        //我没有零偏的传感器，只能靠"角度总偏一点"反推零偏。
+	                                        //预测步把 P[1][0] 压成负数，所以 K1 自然是负的 —— 见下面 #3
 
-	//#3. 状态更新
-	kf->angle += K0 * y;
-	kf->bias  += K1 * y;
+	//#3. 状态更新：x = x + K*y
+	kf->angle += K0 * y;                    //角度按 K0 吸收新息，这就是"加权平均"那一步
+	kf->bias  += K1 * y;                    //零偏靠 K1 吸收新息，K1 为负号时逻辑是：
+	                                        //测量比我预测的大（y>0）→ 说明我积分时用的角速度偏小
+	                                        //→ 说明我把零偏扣多了 → 把 bias 调小
+	                                        //所以 Δbias 必须与 y 反号，而 K1<0 正好实现这一点。
+	                                        //这个负号不是人写的，是协方差矩阵自然推出来的，这是卡尔曼最漂亮的地方：
+	                                        //"该往哪个方向修"由 P 的符号自动决定，不需要人去推因果关系。
 
 	//#4. 协方差更新，必须先用旧值算出新值
-	P00 = kf->P[0][0];
-	P01 = kf->P[0][1];
+	//    P = (I - K*H)*P，展开（I-KH = [1-K0, 0; -K1, 1]）：
+	//      p00 = (1-K0)*p00
+	//      p01 = (1-K0)*p01
+	//      p10 = p10 - K1*p00
+	//      p11 = p11 - K1*p01
+	//    四行都要用到"旧的" p00/p01，所以先把它们存起来。
+	//    如果直接写 kf->P[0][0] -= K0*kf->P[0][0] 再把旧值拿去算 p10，
+	//    拿到的是已经改过的值，P 会算出非正定，滤波器几十步内就发散。
+	P00 = kf->P[0][0];                      //缓存旧 p00（下面 P[1][0] 还要用）
+	P01 = kf->P[0][1];                      //缓存旧 p01（下面 P[1][1] 还要用）
 
-	kf->P[0][0] -= K0 * P00;
-	kf->P[0][1] -= K0 * P01;
-	kf->P[1][0] -= K1 * P00;
-	kf->P[1][1] -= K1 * P01;
+	kf->P[0][0] -= K0 * P00;                //p00 = (1-K0)*p00，等价写法但少一次乘法
+	                                        //看完测量后角度方差必然变小：(1-K0) < 1
+	                                        //这就是"越测越准"的数学表达
+	kf->P[0][1] -= K0 * P01;                //p01 同比例缩小，相关性强度跟着降
+	kf->P[1][0] -= K1 * P00;                //p10 = p10 - K1*p00，保持与 p01 对称
+	kf->P[1][1] -= K1 * P01;                //p11 = p11 - K1*p01。因为 K1<0、p01<0，
+	                                        //这一项实际是 p11 减去一个正数 → 零偏方差也在缩小，
+	                                        //意思是"每修正一次角度，我对零偏的猜测也更确定一点"
 
-	return kf->angle;
+	return kf->angle;                       //直接把融合结果返回，省掉上层再调一次 getter
 }
 
 //
@@ -133,17 +250,21 @@ float App_Kalman_Correct(Kalman_t *kf, float angleMeasure)
 //@参数：dt - 采样周期，单位s
 //@参数：useMeasure - 0 = 本次量测不可信，只做预测
 //@返回值：融合后的角度，单位°
+//@说明：这一层没有算法，只是把五步按顺序串起来，并支持"跳过校正"。
 //
 float App_Kalman_Update(Kalman_t *kf, float angleMeasure, float rateMeasure, float dt, uint8_t useMeasure)
 {
-	App_Kalman_Predict(kf, rateMeasure, dt);
+	App_Kalman_Predict(kf, rateMeasure, dt); //预测无条件执行：即使测量不可信，
+	                                         //"车还在按角速度转"这件事依然成立
 
-	if (useMeasure)
-	{
+	if (useMeasure)                          //useMeasure 存在的意义：车急加速/被撞时，
+	{                                        //加速度计读到的是"重力+线加速度"的合矢量，
 		return App_Kalman_Correct(kf, angleMeasure);
+	                                         //此时 atan2 算出来的角度是错的，
+	                                         //硬塞进去会把真实姿态拉偏。宁可这几帧只积分。
 	}
 
-	return kf->angle;
+	return kf->angle;                        //跳过校正时也要返回角度，保持接口一致
 }
 
 
@@ -154,48 +275,78 @@ float App_Kalman_Update(Kalman_t *kf, float angleMeasure, float rateMeasure, flo
 //
 void App_Kalman_Proc(void)
 {
+	//局部变量而不是直接读全局：一次取值多次使用，避免重复调用 Get 接口
 	float ax, ay, az, gx, gy, gz;
-	float pitch_a, roll_a;
-	uint8_t use_acc = 1;
+	float pitch_a, roll_a;                  //加速度计通道解算出来的角度（带噪声的测量值）
+	uint8_t use_acc = 1;                    //默认相信加速度计，下面门控命中时才改 0
 
 	PERIODIC(5)//进程函数每5ms执行一次
+	//这一行展开后是三条语句（见 task.h）：
+	//    static uint32_t nxt = 0;
+	//    if (GetTick() < nxt) return;
+	//    nxt += 5;
+	//三个后果必须知道：
+	//  1) 里面有 return，所以它必须是函数体的第一条语句，前面不能有任何有效代码；
+	//  2) 只有第一次会把 nxt 初始化为 0，之后它一直累加 5，
+	//     用"累加"而不是"赋值为当前时间"，是为了不让每周期的一点延迟慢慢累积成相位漂移；
+	//  3) 如果某次循环耗时超过 5ms，nxt 会落后于 GetTick()，
+	//     接下来几轮会连续通过，把丢掉的节拍补回来 —— 代价是 dt 不再是真实的 5ms，
+	//     而 KALMAN_DT 是写死的，此时积分会有一点误差。
 
 	//#1. 通过驱动的 Get 接口取值，不碰驱动内部变量
+	//    这是模块解耦：卡尔曼不需要知道 MPU6050 用的是 I2C 还是 SPI、
+	//    量程是 ±2g 还是 ±8g，驱动改了本文件一行都不用动。
 	ax = App_MPU6050_GetAx();
 	ay = App_MPU6050_GetAy();
 	az = App_MPU6050_GetAz();
 
+	//    为什么在这里扣 offset，而不是在驱动里扣？
+	//    因为驱动里的互补滤波要用"原始值"来对标，扣了就对不上账了。
+	//    所以 offset 只在卡尔曼通道里扣 —— 这也是你 README 里
+	//    "互补滤波稳态偏差 = offset × 0.1s" 这笔账能对上的前提。
 	gx = App_MPU6050_GetGx() - gx_offset;
-	gy = App_MPU6050_GetGy() - gy_offset;
+	gy = App_MPU6050_GetGy() - gy_offset;   //y 轴后面取反，所以这里先按原符号扣，别提前变号
 	gz = App_MPU6050_GetGz() - gz_offset;
 
 	//#2. 加速度计解算角度（轴向约定与互补滤波版本一致）
-	pitch_a = qatan2(ay, az) / 3.1415927 * 180.0f;
-	roll_a  = qatan2(ax, az) / 3.1415927 * 180.0f;
+	//    静止时加速度计测到的就是重力矢量在三个轴上的投影，
+	//    用 atan2 就能反算出倾角：倾斜 θ 时 ay = g·sinθ, az = g·cosθ，
+	//    两者相除正好把 g 约掉，所以这个公式与量程、与 g 的具体取值都无关。
+	//    用 atan2 而不是 asin(ay/g)：atan2 在 ±90° 附近不敏感，也不用手动判象限。
+	//    为什么要 /3.1415927*180 而不是用 M_PI？因为不想为这一个常数引入 math.h，
+	//    newlib 的 M_PI 还可能因为 _USE_MATH_DEFINES 没定义而编译不过。
+	pitch_a = qatan2(ay, az) / 3.1415927 * 180.0f;  //绕 x 轴倾 → 看 y、z 分量
+	roll_a  = qatan2(ax, az) / 3.1415927 * 180.0f;  //绕 y 轴倾 → 看 x、z 分量
+	                                                //注意 pitch 用的是 ay 不是 ax：
+	                                                //轴向约定必须和后面的陀螺轴对应上，
+	                                                //配错了表现是"一推就反着倒"，很难查
 
 	//存一份原始解算结果，供 VOFA+ 观察滤波器对噪声的抑制效果
 	pitch_acc = pitch_a;
 	roll_acc  = roll_a;
 
-
 	//#3. 首次进入用加速度计角度做初值
+	//    为什么不在 main 里初始化？因为 main 里刚上电时 MPU6050 可能还没读到有效数据，
+	//    在这里初始化能保证拿到的是第一帧真实测量值。
 	if (kf_ready == 0)
 	{
-		App_Kalman_Init(&kf_pitch, pitch_a);
+		App_Kalman_Init(&kf_pitch, pitch_a);    //用测量值起步，滤波器第一帧就在正确位置附近
 		App_Kalman_Init(&kf_roll,  roll_a);
-		kf_ready = 1;
-	}
+		kf_ready = 1;                           //置位后再也不进来，避免每 5ms 把状态重置回测量值
+	}                                          //如果忘了这句，滤波器会退化成"直接用加速度计"，
+	                                           //表现就是完全没有滤波效果
 
 #if KALMAN_ACC_GATE
 	//静止时 |a|² 约等于 1，明显偏离说明有额外线加速度，
 	//此时 atan2 算出来的角度不可信，只做预测不做校正
+	//这是"自适应"的雏形：不放宽滤波器参数，而是判断某一帧数据该不该用。
 	{
-		float acc_norm2 = ax * ax + ay * ay + az * az;
+		float acc_norm2 = ax * ax + ay * ay + az * az;   //模长的平方，省一次开方
 		if (acc_norm2 < 0.49f || acc_norm2 > 1.69f)//0.7g ~ 1.3g
-		{
-			use_acc = 0;
-		}
-	}
+		{                                                //0.49=0.7²，1.69=1.3²
+			use_acc = 0;                                 //超出范围 → 这一帧只积分不校正
+		}                                                //默认关闭（KALMAN_ACC_GATE=0），
+	}                                                    //因为推车测试时正需要加计把车拉回来
 #endif
 
 	//#4. 融合
@@ -203,11 +354,15 @@ void App_Kalman_Proc(void)
 	pitch = App_Kalman_Update(&kf_pitch, pitch_a, gx,  KALMAN_DT, use_acc);
 	//翻滚角：陀螺仪绕 y 轴，正方向与 gy 相反（沿用原代码约定）
 	roll  = App_Kalman_Update(&kf_roll,  roll_a, -gy, KALMAN_DT, use_acc);
+	//这个负号必须和互补滤波里的符号约定一致，否则两个滤波器给出的
+	//翻滚角方向相反，画在一起会看到两条镜像曲线 —— 排查时先看这个
 
 	//#5. 偏航角：没有磁力计就没有绝对参考，
 	//做校正反而会被噪声拉偏，所以只用陀螺积分
-	yaw_rate = gz;
-	yaw = yaw + gz * KALMAN_DT;
+	yaw_rate = gz;                          //先发出去给转向环当反馈（已扣静态零偏）
+	yaw = yaw + gz * KALMAN_DT;             //纯积分，必然随时间漂 —— 这是硬件的局限，不是代码问题。
+	                                        //写成 yaw = yaw + ... 而不是 yaw += ...，
+	                                        //是为了和上面卡尔曼的写法保持视觉一致，语义相同
 }
 
 
@@ -220,43 +375,56 @@ void App_Kalman_Proc(void)
 //
 void App_Kalman_GyroCalibrate(uint16_t samples)
 {
+	//用 float 累加而不是 int：陀螺量程转换后是浮点数，转成整型会丢精度
+	//sumX/sumY/sumZ 就是三轴各自的角度和，最后除以样本数就是平均值
 	float sumX = 0.0f, sumY = 0.0f, sumZ = 0.0f;
-	uint16_t i;
+	uint16_t i;                             //和 samples 同类型，避免比较时的隐式类型转换
 
-	if (samples == 0)
-	{
+	if (samples == 0)                       //防除零：下面要除以 (float)samples，
+	{                                       //传 0 进来会得到 inf/nan，之后整个滤波器全废且不报错
 		return;
 	}
 
 	for (i = 0; i < samples; i++)
 	{
 		App_MPU6050_Update();//读一次传感器
+		//注意这里绕过了 5ms 节拍直接读：标定要的是"最短时间内连续采样"，
+		//如果等 PERIODIC 节拍，300 个样本要 1.5 秒，手早就动了，标定值就废了
 
-		sumX += App_MPU6050_GetGx();
-		sumY += App_MPU6050_GetGy();
+		sumX += App_MPU6050_GetGx();        //累加的是"原始值"，不是扣过 offset 的值，
+		sumY += App_MPU6050_GetGy();        //否则重复标定会把自己越扣越偏
 		sumZ += App_MPU6050_GetGz();
 
-		Delay(1);
+		Delay(1);                           //每次间隔 1ms，让陀螺内部采样更新一次，
+		                                    //连续读太快会拿到同一个寄存器值，平均就没意义了
 	}
 
-	gx_offset = sumX / (float)samples;
-	gy_offset = sumY / (float)samples;
+	//取算术平均作为零偏。为什么平均值就是零偏？
+	//静止时真角速度是 0，所以读到的全部内容 = 零偏 + 随机噪声，
+	//平均之后噪声互相抵消（标准差缩小 √N 倍），剩下的就是零偏。
+	//300 个样本能把噪声压到 1/17，但压不掉"标定期间手在动"这种系统性误差 ——
+	//这就是为什么你这几次 ch3 会从 -4.01 变到 +1.25。
+	gx_offset = sumX / (float)samples;      //(float) 强制转换不能省：uint16_t/uint16_t 会做整数除法，
+	gy_offset = sumY / (float)samples;      //结果全是 0
 	gz_offset = sumZ / (float)samples;
 }
 
 
 //
 //@简介：获取俯仰角，单位°
+//@说明：下面这一组 getter 都是"只读一行"的封装。看起来啰嗦，
+//       但它是模块边界：上层只能读不能写，滤波器内部状态不会被意外改掉。
 //
 float App_Kalman_GetPitch(void)
 {
-	return pitch;
+	return pitch;                           //控制环的 theta 就用这个（app_control.c 第 61 行再转成弧度）
 }
 
 //
 //@简介：获取"加速度计直接解算"的俯仰角，单位°
 //@说明：完全没经过滤波，噪声大但能反映真实输入。
 //       和 App_Kalman_GetPitch() 画在一起，就能看出滤波器压掉了多少噪声。
+//       这是调 Q/R 时唯一的判据来源：只看滤波结果永远不知道自己滤过头了没有。
 //
 float App_Kalman_GetAccelPitch(void)
 {
@@ -276,7 +444,8 @@ float App_Kalman_GetAccelRoll(void)
 //
 float App_Kalman_GetRoll(void)
 {
-	return roll;
+	return roll;                            //目前控制环没用（平衡车只控俯仰），
+	                                        //留它是为了 VOFA+ 对照和以后做两轮侧向平衡
 }
 
 //
@@ -284,7 +453,7 @@ float App_Kalman_GetRoll(void)
 //
 float App_Kalman_GetYaw(void)
 {
-	return yaw;
+	return yaw;                             //纯积分值，只能看相对转角，不能当绝对方位用
 }
 
 //
@@ -292,7 +461,10 @@ float App_Kalman_GetYaw(void)
 //
 float App_Kalman_GetPitchBias(void)
 {
-	return kf_pitch.bias;
+	return kf_pitch.bias;                   //这就是 VOFA+ 的 ch4。
+	                                        //上电几十秒内它会从 0 收敛到 -gx_offset 附近 ——
+	                                        //因为 offset 已经扣过一遍，滤波器在线补的是"剩下的残差"，
+	                                        //两者相加才是总零偏。这个符号关系可以用来验证通道接对了没有
 }
 
 //
@@ -311,7 +483,9 @@ float App_Kalman_GetRollBias(void)
 //
 float App_Kalman_GetGyroOffset(void)
 {
-	return gx_offset;
+	return gx_offset;                       //ch3。和 ch4 一起构成 README 里"零偏对账"那张表：
+	                                        //(ch3 + ch4) × 0.1s ≈ ch2 - ch1
+	                                        //注意是"两个一起乘"，只按 ch3 算会差 0.1° 左右
 }
 
 //
@@ -319,7 +493,11 @@ float App_Kalman_GetGyroOffset(void)
 //
 float App_Kalman_GetPitchRate(void)
 {
-	return kf_pitch.rate;
+	return kf_pitch.rate;                   //这个值是 Predict 里算出来的 rateMeasure - bias，
+	                                        //比原始 gx 干净：静态零偏和在线残差都扣掉了。
+	                                        //控制环的角速度内环用它当反馈（app_control.c 第 62 行），
+	                                        //如果这里漏扣零偏，内环会一直认为车在转，输出恒定偏置，
+	                                        //表现就是车永远往一个方向慢慢跑
 }
 
 //
@@ -327,5 +505,7 @@ float App_Kalman_GetPitchRate(void)
 //
 float App_Kalman_GetYawRate(void)
 {
-	return yaw_rate;
+	return yaw_rate;                        //转向环（app_control.c 第 99 行）用它做反馈。
+	                                        //只扣了静态 offset，没有在线估计 —— 转久了仍会有残余漂移，
+	                                        //但转向环是速度环，对零偏不敏感（不需要积分），所以够用
 }
