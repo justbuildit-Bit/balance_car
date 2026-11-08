@@ -7,4 +7,5 @@ void App_Motor_Proc(void);
 void App_Motor_SetOmega_L(float Omega);
 void App_Motor_SetOmega_R(float Omega);
 void App_Motor_Cmd(uint8_t On);
+uint8_t App_Motor_GetState(void);
 #endif 

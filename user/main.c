@@ -20,7 +20,8 @@
 
 int main(void)
 {
-	NVIC_PriorityGroupConfig(NVIC_PriorityGroup_0);
+	//中断优先级分组：2 位抢占 + 2 位响应（Group_0 抢占位为 0，等于所有中断都不能互相打断）
+	NVIC_PriorityGroupConfig(NVIC_PriorityGroup_2);
 	
 //	QMath_Test();
 //	MPU6050_EularAngleTest();

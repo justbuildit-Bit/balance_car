@@ -8,6 +8,7 @@
 
 static PID_TypeDef pid_motor_l;//左电机调速系统的PID控制器
 static PID_TypeDef pid_motor_r;//右电机调速系统的PID控制器
+static uint8_t motor_on = 0;//电机当前使能状态：0 - TB6612 待机，1 - 运行（供按键与保护逻辑读取）
 
 
 //
@@ -73,10 +74,19 @@ void App_Motor_SetOmega_R(float Omega)
 //
 void App_Motor_Cmd(uint8_t On)
 {
-	App_PWM_Cmd(On);
+	motor_on = (On != 0);
+	App_PWM_Cmd(motor_on);
 	
 	//在开关电机的同时需要对PID控制器进行复位
 	PID_Reset(&pid_motor_l);
 	PID_Reset(&pid_motor_r);
 }
-	
+
+//
+//@简介：读取电机当前使能状态
+//@返回值：0 - 待机，1 - 运行
+//
+uint8_t App_Motor_GetState(void)
+{
+	return motor_on;
+}

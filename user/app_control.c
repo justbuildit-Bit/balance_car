@@ -7,10 +7,12 @@
 #include "app_motor.h"
 #include "app_encoder.h"
 #include "app_kalman.h"
+#include "app_control.h"
 
 //姿态反馈源选择：1 = 卡尔曼滤波，0 = 原来的互补滤波
 //（main 里两种滤波是并行跑的，改这一个宏就能做 A/B 对比）
 #define CONTROL_USE_KALMAN   1
+#define TILT_LIMIT_RAD       0.698f//倾角保护阈值 40°（40*π/180 ≈ 0.698 rad）
 
 static PID_TypeDef pid_velocity;//速度环的PID控制器
 static PID_TypeDef pid_theta;//θ环的PID控制器
@@ -20,7 +22,9 @@ static PID_TypeDef pid_turn;//转向环的PID控制器
 static const float g = 9.8;//重力加速度,单位m/s^2
 static const float lp = 0.062;//平衡车中心到电池中心的距离， 单位m
 static const float rw = 0.032;//轮胎的半径，单位m
+
 static float omega_ref = 0.0f;
+static uint8_t tilt_fault = 0;//倾角保护状态：0 - 正常，1 - 已触发（需按键清除）
 static uint64_t lastTime = 0;
 //
 //@简介：负责初始化平衡车控制系统
@@ -64,6 +68,21 @@ void App_Control_Proc(void)
 	float theta     = App_MPU6050_GetPitch() * 0.0174533f;//单位rad
 	float theta_dot = App_MPU6050_GetGx() * 0.0174533f;//单位rad/s
 #endif
+	
+	//#2.5 倾角保护：车体倒下（|θ| > 40°）立即断电机使能，
+	//防止轮子空转磨胎、堵转烧驱动。故障态只有按键单击（内部调 App_Control_Reset）能清除，
+	//否则车体在阈值附近晃动会反复通断，H 桥频繁切换更容易炸管。
+	if(tilt_fault != 0)
+	{
+		return;//已保护，保持停机，等按键复位
+	}
+	if(theta > TILT_LIMIT_RAD || theta < -TILT_LIMIT_RAD)
+	{
+		App_Control_Reset();//先清积分与 lastTime，避免车扶正瞬间积分饱和冲出去
+		tilt_fault = 1;//上面 Reset 会清故障位，所以必须在这之后再置位
+		App_Motor_Cmd(0);//拉低 STBY，TB6612 进入待机，H 桥输出关闭
+		return;
+	}
 	
 	//#3. 计算速度环的反馈值x_dot
 	float omega2 = -theta_dot * (lp + rw) / rw;
@@ -123,6 +142,9 @@ void App_Control_Reset(void)
 	PID_Reset(&pid_velocity);
 	PID_Reset(&pid_theta);
 	PID_Reset(&pid_theta_dot);
+
+	//#3. 清除倾角保护故障位（按键单击时会走到这里，即"复位后重新上电"）
+	tilt_fault = 0;
 }
 	
 //

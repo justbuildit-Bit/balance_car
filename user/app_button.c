@@ -23,26 +23,16 @@ void App_Button_Proc(void)
 	My_Button_Proc(&userKey);
 }
 
-static uint8_t pwm_on = 0;//0-电机休眠，1-电机活动
-
 //按钮点击的回调函数
 void OnUserKey_Clicked(uint8_t clicks)
 {
 	if(clicks == 1)
 	{
-		App_Control_Reset();
+		//以电机的实际状态取反，不再用本地变量记状态：
+		//倾角保护会把电机拉进待机，本地变量并不知道，会出现"按一次没反应、按两次才启动"
+		uint8_t on = (App_Motor_GetState() == 0) ? 1 : 0;
 		
-		//翻转电机状态
-		if(pwm_on == 0)
-		{
-			pwm_on = 1;
-		}
-		else
-		{
-			pwm_on = 0;
-		}
-		
-		App_Motor_Cmd(pwm_on);
+		App_Control_Reset();//清 PID 积分、lastTime 与倾角保护故障位
+		App_Motor_Cmd(on);
 	}
 }
-	

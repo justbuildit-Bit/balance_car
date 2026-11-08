@@ -182,7 +182,7 @@ static void Encoder_R_Init(void)
 	NVIC_InitTypeStructure.NVIC_IRQChannel = EXTI15_10_IRQn;//中断编号
 	NVIC_InitTypeStructure.NVIC_IRQChannelCmd = ENABLE;
 	NVIC_InitTypeStructure.NVIC_IRQChannelPreemptionPriority = 0;
-	NVIC_InitTypeStructure.NVIC_IRQChannelSubPriority = 0;
+	NVIC_InitTypeStructure.NVIC_IRQChannelSubPriority = 1;
 	
 	NVIC_Init(&NVIC_InitTypeStructure);
 }
@@ -265,6 +265,3 @@ void EXTI15_10_IRQHandler(void)
 		}
 	}
 }
-
-	
-	

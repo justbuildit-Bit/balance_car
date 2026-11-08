@@ -155,8 +155,8 @@ static void ADC1_Init(void)
 	
 	NVIC_InitStruct.NVIC_IRQChannel =  ADC1_2_IRQn;
 	NVIC_InitStruct.NVIC_IRQChannelCmd = ENABLE;
-	NVIC_InitStruct.NVIC_IRQChannelPreemptionPriority = 0;
-	NVIC_InitStruct.NVIC_IRQChannelSubPriority = 2;
+	NVIC_InitStruct.NVIC_IRQChannelPreemptionPriority = 3;
+	NVIC_InitStruct.NVIC_IRQChannelSubPriority = 0;
 	
 	NVIC_Init(&NVIC_InitStruct);
 	
