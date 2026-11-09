@@ -55,7 +55,7 @@ int main(void)
 		App_Motor_Proc();
 		App_MPU6050_Proc();//互补滤波（保留，用于对照）
 		App_Kalman_Proc();//卡尔曼滤波：必须在 MPU6050_Proc 之后，读的才是本周期的数据
-		App_Vofa_Proc();//串口发波形：放在两个滤波之后，发出去的才是本周期结果
+		//App_Vofa_Proc();//串口发波形：放在两个滤波之后，发出去的才是本周期结果
 		App_Control_Proc();
 		App_RC_Proc();
 	}
